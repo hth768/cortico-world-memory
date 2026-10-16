@@ -1,0 +1,687 @@
+{
+  "tools": [
+    {
+      "name": "mem_remember",
+      "description": "把一件值得长期记住的事写进记忆库(同时落「事实库」做去重重排 + 建向量索引,之后 mem_recall 可按语义找回)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "内容"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "把一件值得长期记住的事写进长期记忆,顺带『事实库』去重与向量索引。",
+        "en": "Store something worth remembering long-term, deduplicated and indexed for later recall."
+      }
+    },
+    {
+      "name": "mem_recall",
+      "description": "按语义+关键词混合检索长期记忆(事实库全文 + BM25+向量+RRF 融合),找旧账/回忆约定时用。scope 留空或填 main = 跨全部记忆域(含自动捕获的对话);填具体 scope 只搜该域;可填某人的 qq:<QQ号> 来检索 TA 在私聊与群聊里统一沉淀的记忆(私聊↔群聊无缝衔接)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "查询"
+          },
+          "top_k": {
+            "type": "number",
+            "title": "条数"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域(留空=全部)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "按语义加关键词混合检索长期记忆,找旧账、回忆约定时用。",
+        "en": "Search long-term memory with hybrid semantic and keyword recall, for old promises and shared history."
+      }
+    },
+    {
+      "name": "mem_recent",
+      "description": "回看本域最近的短期对话(最多 maxHistory 条)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "n": {
+            "type": "number",
+            "title": "条数"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read",
+        "snapshot"
+      ],
+      "summary": {
+        "zh": "回看本记忆域最近的短期对话。",
+        "en": "Read the most recent short-term turns in this scope."
+      }
+    },
+    {
+      "name": "mem_overflow",
+      "description": "短期记忆快满时,取出最旧的一半条目(出窗),让它们被压缩进 mem_summary。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "取出已溢出短期窗口的最旧条目,好把它们压缩进摘要。",
+        "en": "Fetch the oldest entries that fell out of the short-term window so they can be rolled into the summary."
+      }
+    },
+    {
+      "name": "mem_summary",
+      "description": "读或写本域的对话摘要。带 text 为写(建议先把 mem_overflow 取出的旧条目浓缩成一段);不带为读。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "摘要内容"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
+      "summary": {
+        "zh": "读或写本记忆域的对话摘要。",
+        "en": "Read or replace the conversation summary of this scope."
+      }
+    },
+    {
+      "name": "mem_topic",
+      "description": "读或写当前话题(话题切换时更新它,帮助上下文连贯)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "话题内容"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
+      "summary": {
+        "zh": "读或写当前话题,让上下文保持连贯。",
+        "en": "Read or update the current topic to keep the context coherent."
+      }
+    },
+    {
+      "name": "mem_note",
+      "description": "记一条「重要信息」(用户明确要求记住的事/硬约束),它会常驻进环境提示词。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "内容"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "记一条常驻提示词的重要信息或硬约束。",
+        "en": "Record a persistent note or hard constraint that stays in the environment prompt."
+      }
+    },
+    {
+      "name": "mem_notes",
+      "description": "列出本域的全部「重要信息」及编号(编号用于 mem_forget_note)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "列出本记忆域的全部重要信息及编号。",
+        "en": "List every persistent note in this scope together with its index."
+      }
+    },
+    {
+      "name": "mem_forget_note",
+      "description": "按编号(1 起)删掉一条「重要信息」。先 mem_notes 确认编号再用。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "type": "number",
+            "title": "编号"
+          },
+          "scope": {
+            "type": "string",
+            "title": "记忆域"
+          }
+        },
+        "required": [
+          "index"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "按编号删掉一条重要信息,先 mem_notes 确认编号再用。",
+        "en": "Delete a persistent note by index; check mem_notes for the index first."
+      }
+    },
+    {
+      "name": "mem_knowledge",
+      "description": "沉淀一条「通用知识」(联网学到的、主题化的知识条目,区别于 mem_remember 的零散事实)。同主题会合并,事实级去重,超量淘汰最旧。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "topic": {
+            "type": "string",
+            "title": "主题"
+          },
+          "facts": {
+            "type": "string",
+            "title": "知识要点(多条用换行分隔)"
+          },
+          "keywords": {
+            "type": "string",
+            "title": "关键词(逗号分隔,可选)"
+          },
+          "sources": {
+            "type": "string",
+            "title": "来源(逗号分隔,可选)"
+          }
+        },
+        "required": [
+          "topic",
+          "facts"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "沉淀一条可复用的通用知识条目,同主题自动合并。",
+        "en": "Add a reusable, topic-organized piece of general knowledge, merged into existing topics."
+      }
+    },
+    {
+      "name": "mem_knowledge_fact",
+      "description": "把单条知识文本直接记进知识库(主题取前 30 字,自动提炼关键词)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "知识内容"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "把单条知识文本直接记进知识库。",
+        "en": "File a single knowledge sentence straight into the knowledge base."
+      }
+    },
+    {
+      "name": "mem_knowledge_recall",
+      "description": "回答问题前先查知识库,命中就直接复用(省去重复搜索)。返回最相关主题及要点。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "查询/问题"
+          },
+          "top_k": {
+            "type": "number",
+            "title": "条数"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "回答前先查知识库,命中就直接复用。",
+        "en": "Check the knowledge base before answering and reuse any hit directly."
+      }
+    },
+    {
+      "name": "mem_knowledge_list",
+      "description": "列出知识库全部主题(及命中数),便于总览已沉淀的知识。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "number",
+            "title": "条数"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "列出知识库的全部主题,便于总览已沉淀的知识。",
+        "en": "List every knowledge topic for an overview of what has been learned."
+      }
+    },
+    {
+      "name": "mem_reflect",
+      "description": "沉淀一条「反思/交互偏好/纠错」(五维记忆之反思维):用户偏好(preference)、交互风格(style)、用户洞察(insight)、AI纠错(correction)、对话模式(pattern)。可执行的会被提炼为常驻交互规则。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "反思内容(一句话)"
+          },
+          "type": {
+            "type": "string",
+            "title": "类型:preference/style/insight/correction/pattern"
+          },
+          "evidence": {
+            "type": "string",
+            "title": "支撑证据/对话片段(可选)"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "置信度0-1"
+          },
+          "actionable": {
+            "type": "number",
+            "title": "是否可执行(1/0)"
+          }
+        },
+        "required": [
+          "content",
+          "type"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "沉淀一条反思、偏好或纠错,可执行的会被提炼成规则。",
+        "en": "Record a reflection, preference or correction; actionable ones are distilled into rules."
+      }
+    },
+    {
+      "name": "mem_reflect_rules",
+      "description": "列出已沉淀的交互规则(从可执行反思提炼,常驻指导后续交互)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "列出由可执行反思提炼出的交互规则。",
+        "en": "List the interaction rules distilled from actionable reflections."
+      }
+    },
+    {
+      "name": "mem_persona",
+      "description": "记录与某用户的独特相处模式(五维记忆之人格维):特征列表 + 风格描述,per-user 隔离、特征去重、上限20。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          },
+          "traits": {
+            "type": "string",
+            "title": "相处特征(多条用换行或逗号分隔)"
+          },
+          "style": {
+            "type": "string",
+            "title": "整体风格描述(可选)"
+          }
+        },
+        "required": [
+          "user_id",
+          "traits"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "记录与某个用户独特的相处模式,按用户隔离。",
+        "en": "Record how to relate to one particular user, kept separate per user."
+      }
+    },
+    {
+      "name": "mem_persona_get",
+      "description": "读取某用户的人格记忆(特征+风格),不存在则提示。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "读取某个用户的人格记忆。",
+        "en": "Read the persona memory of one user."
+      }
+    },
+    {
+      "name": "mem_persona_global",
+      "description": "设置/读取全局风格(跨用户统一的人格基调,可选)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "style": {
+            "type": "string",
+            "title": "全局风格(留空为读)"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
+      "summary": {
+        "zh": "设置或读取跨用户统一的全局人格基调。",
+        "en": "Set or read the global persona tone shared across all users."
+      }
+    },
+    {
+      "name": "mem_profile",
+      "description": "记/更新某用户的「人物档案」(永久记住的关键信息:称呼/身份/关系等),常驻进环境提示词。合并新事实+去重+上限50。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          },
+          "facts": {
+            "type": "string",
+            "title": "人物事实(多条用换行或逗号分隔)"
+          }
+        },
+        "required": [
+          "user_id",
+          "facts"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "记入或更新某个用户的人物档案,常驻进提示词。",
+        "en": "Add to or update a user profile that stays in the environment prompt."
+      }
+    },
+    {
+      "name": "mem_profile_replace",
+      "description": "整体替换某用户人物档案(用于纠错,例如用户说「别再叫我XX」)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          },
+          "facts": {
+            "type": "string",
+            "title": "正确的人物事实(多条用换行或逗号分隔)"
+          }
+        },
+        "required": [
+          "user_id",
+          "facts"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "整体替换某个用户的人物档案,用于纠错。",
+        "en": "Replace a user profile wholesale, for corrections."
+      }
+    },
+    {
+      "name": "mem_profile_get",
+      "description": "读取某用户人物档案。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "用户ID(默认 main)"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "读取某个用户的人物档案。",
+        "en": "Read the profile of one user."
+      }
+    },
+    {
+      "name": "mem_stats",
+      "description": "记忆库统计:记忆域/条数/向量索引覆盖/当前配置的向量来源。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "tags": [
+        "snapshot",
+        "read"
+      ],
+      "summary": {
+        "zh": "查看记忆库的规模、记忆域与向量索引覆盖情况。",
+        "en": "Show the memory store size, its scopes and how much the vector index covers."
+      }
+    },
+    {
+      "name": "mem_capture_now",
+      "description": "立刻扫描事件流,把自上次扫描以来的外部入站用户消息沉淀进记忆(自动捕获的手动触发,无需等轮询周期)。QQ 没开时也可抓其它 world 的对话。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "立刻把新入站的用户消息沉淀进记忆,不等轮询周期。",
+        "en": "Fold newly arrived user messages into memory now, without waiting for the poll."
+      }
+    },
+    {
+      "name": "mem_flush",
+      "description": "把记忆立即落盘(平时自动防抖落盘,一般不用调)。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "把记忆立即落盘,平时会自动防抖写入。",
+        "en": "Flush memory to disk immediately; writes are debounced by default."
+      }
+    },
+    {
+      "name": "mem_export",
+      "description": "把全部记忆导出为文件(JSON/Markdown),便于备份、迁移、阅读。知识库为全局始终包含;其他可按作用域/用户过滤。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "type": "string",
+            "optional": true,
+            "title": "格式",
+            "description": "json | markdown | both(默认 both)。"
+          },
+          "scope": {
+            "type": "string",
+            "optional": true,
+            "title": "作用域过滤",
+            "description": "可选,按作用域/用户过滤(短期/事实/向量按 scope;反思/人格/档案按 userId)。留空导出全部。"
+          },
+          "outDir": {
+            "type": "string",
+            "optional": true,
+            "title": "导出目录",
+            "description": "可选,文件保存目录,默认 <数据目录>/exports。"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "导出整个记忆库的快照。",
+        "en": "Export a snapshot of the whole memory store."
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "memory.context",
+      "description": {
+        "zh": "记忆快照:要点、摘要、当前话题与记忆域统计的拼接文本,每轮构建上下文时现取。",
+        "en": "A memory snapshot: notes, summary, current topic and store statistics joined into one text, taken fresh each turn."
+      },
+      "trigger": "piggyback"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.memory.envPrompt",
+      "title": "记忆系统 · 环境提示词",
+      "role": "envPrompt",
+      "content": "你带有一套自己的记忆(五层记忆:事实库/知识库/反思/人格/档案 + 三级记忆底座 + 混合检索记忆库)。\r\n\r\n## 记忆机制\r\n- {{memoryContext}}\r\n- 记忆域(memory scopes): {{memoryScopes}}。默认都在 `main`;跨场景的事(游戏/聊天)可以分域存放。\r\n- 向量索引覆盖: {{memoryVectors}}（已建向量 / 记忆总条数）。\r\n\r\n## 使用纪律\r\n1. 别人说了「记住这个」「以后别这样」这类话 → 立刻 mem_note(硬约束/偏好)或 mem_remember(一般事实)。\r\n2. 要找以前聊过/发生过什么 → 先 mem_recall(语义+关键词混合检索),不要凭空编造回忆;检索不到就直说想不起来。\r\n3. 一次对话里反复出现的新约定,值得顺手 mem_remember 存档,免得上下文滚掉就忘。\r\n4. 短期记忆快满时用 mem_overflow 取出旧条目,浓缩成一段再用 mem_summary 写回——这相当于\"把旧事压进长期记忆\"。\r\n5. 话题切换或每轮收尾时,可以用 mem_topic 更新当前话题,保持连贯。\r\n6. 记忆是你的私事:不要向用户转述\"我调用了什么工具\",自然地表现出\"我记得\"就好。\r\n\r\n一句话:像真人一样记得该记的、忘掉该忘的;要回忆就查库,别装记得。\r\n"
+    }
+  ]
+}

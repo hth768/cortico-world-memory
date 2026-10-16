@@ -1,0 +1,46 @@
+{
+  "name": "cortico-world-memory",
+  "version": "0.2.1",
+  "type": "module",
+  "description": "Cortico World 扩展：五层记忆（事实库/知识库/反思/人格/档案）+ 三级记忆底座 + Hybrid Recall 向量混合检索（移植自 E:/qq_bot 的记忆系统与 memory_server 向量 sidecar，qq_bot 源码零改动）。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hth768/cortico-world-memory.git"
+  },
+  "homepage": "https://github.com/hth768/cortico-world-memory#readme",
+  "bugs": {
+    "url": "https://github.com/hth768/cortico-world-memory/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "memory",
+    "vector-search",
+    "bm25",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "describe.json",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

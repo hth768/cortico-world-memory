@@ -1,0 +1,8 @@
+# 本地发布凭证(含 npm token),切勿提交
+.npmrc
+
+node_modules/
+__pycache__/
+*.tsbuildinfo
+*.log
+.DS_Store
