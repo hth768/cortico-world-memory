@@ -631,7 +631,7 @@
     },
     {
       "name": "mem_export",
-      "description": "把全部记忆导出为文件(JSON/Markdown),便于备份、迁移、阅读。知识库为全局始终包含;其他可按作用域/用户过滤。",
+      "description": "把全部记忆导出为文件,便于备份/迁移/阅读。导出与迁入共用同一套 cortico-memory-export 规范,json 与 sqlite 可互换。知识库为全局始终包含;其他可按作用域/用户过滤。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -640,7 +640,7 @@
             "type": "string",
             "optional": true,
             "title": "格式",
-            "description": "json | markdown | both(默认 both)。"
+            "description": "json | markdown | sqlite | both(json+md) | all(三者),或用逗号/竖线组合;默认 both。"
           },
           "scope": {
             "type": "string",
@@ -661,8 +661,40 @@
         "act"
       ],
       "summary": {
-        "zh": "导出整个记忆库的快照。",
-        "en": "Export a snapshot of the whole memory store."
+        "zh": "导出整个记忆库的快照(json / markdown / sqlite)。",
+        "en": "Export a snapshot of the whole memory store (json / markdown / sqlite)."
+      }
+    },
+    {
+      "name": "mem_import",
+      "description": "把导出的记忆文件(.json 或 .sqlite,遵循 cortico-memory-export 规范)迁移/恢复进当前记忆库。导出与迁入使用同一套规范,两种格式可互换。默认 merge(按 scope/userId 合并、数组去重);可选 replace 覆盖数组型内容。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "文件路径",
+            "description": ".json 或 .sqlite 记忆导出文件(绝对或相对路径)。"
+          },
+          "mode": {
+            "type": "string",
+            "optional": true,
+            "title": "合并模式",
+            "description": "merge(默认) | replace。merge 按作用域/用户合并并对数组去重;replace 覆盖数组型内容。"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "tags": [
+        "write",
+        "act"
+      ],
+      "summary": {
+        "zh": "把导出的记忆文件迁移/恢复进当前记忆库。",
+        "en": "Migrate or restore an exported memory file (.json or .sqlite) into the current memory store."
       }
     }
   ],

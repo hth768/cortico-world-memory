@@ -135,13 +135,14 @@ export class KnowledgeStore {
       let score = 0;
       for (const kw of [e.topic, ...e.keywords]) {
         const k = kw.trim().toLowerCase();
-        if (k.length >= 3 && q.includes(k)) score = Math.max(score, k === e.topic.toLowerCase() ? 3 : 2);
+        // 放宽阈值(中文 2 字词即有效);双向子串匹配(适配中文查询/关键词长度不对称)。
+        if (k.length >= 2 && (q.includes(k) || k.includes(q))) score = Math.max(score, k === e.topic.toLowerCase() ? 3 : 2);
       }
-      // 事实文本命中(中文/长句常只在 fact 里):给基础分 1。
+      // 事实文本命中(中文/长句常只在 fact 里):双向子串给基础分 1。
       if (score === 0) {
         for (const f of e.facts) {
           const fk = f.trim().toLowerCase();
-          if (fk && q.includes(fk)) { score = 1; break; }
+          if (fk && (q.includes(fk) || fk.includes(q))) { score = 1; break; }
         }
       }
       if (score === 0 && qTokens.length && qTokens.every((t) => entryBlob(e).includes(t))) score = 1;

@@ -1,5 +1,6 @@
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import type { World, WorldHost, ToolDef, ToolTag, ToolSpec, EventEnvelope } from 'cortico/core/types.ts';
 import type { WorldContext } from 'cortico/world.ts';
 import { MEMORY_DEFAULTS, type MemoryConfig } from './config.ts';
@@ -13,17 +14,14 @@ import { ReflectionStore } from './reflection-store.ts';
 import { PersonaStore } from './persona-store.ts';
 import { ProfileStore } from './profile-store.ts';
 import { createBackend, StoreBackend, ALL_STEMS, backfillSqliteToJson } from './backend.ts';
-import { buildEventText, buildView, promptVars } from './observe.ts';
+import { buildBundle, writeBundleJson, writeBundleSqlite, readBundleFromFile, applyBundle, parseFormatTokens, type ImportMode, type ExportBundle, type ReadBundleResult } from './migrate.ts';
+import { buildEventText, buildView, promptVars, snapshotSignature } from './observe.ts';
+import { SnapshotPusher } from './snapshot.ts';
+import { formatRecallResults } from './recall.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
 type _Dict = Record<string, any>;
-
-/** 仅保留对象中指定 key 的条目(用于按 scope 过滤)。 */
-function pickScope(obj: _Dict, key: string): _Dict {
-  if (obj && typeof obj === 'object' && key in obj) return { [key]: obj[key] };
-  return {};
-}
 
 /** 把导出 bundle 渲染为易读 Markdown。 */
 function renderMemoryMarkdown(b: _Dict): string {
@@ -43,7 +41,8 @@ function renderMemoryMarkdown(b: _Dict): string {
   const rules = (b.reflection?.rules ?? []) as any[];
   const personas = (b.persona?.personas ?? {}) as _Dict;
   const personaKeys = Object.keys(personas);
-  const vectors = (b.vectors?.vectors ?? []) as any[];
+  const vectorMap = (b.vectors?.vectors ?? {}) as _Dict;
+  const vectors = Object.keys(vectorMap).flatMap((sc) => (Array.isArray(vectorMap[sc]) ? (vectorMap[sc] as any[]) : []));
 
   L.push('# 记忆导出');
   L.push('');
@@ -87,7 +86,7 @@ function renderMemoryMarkdown(b: _Dict): string {
     L.push(`## 事实库 (${factKeys.length} scope)`);
     for (const s of factKeys) {
       L.push(`### ${s}`);
-      for (const f of factScopes[s] ?? []) L.push(`- ${f.text ?? ''}`);
+      for (const f of factScopes[s] ?? []) L.push(`- ${f.fact ?? f.text ?? ''}`);
     }
     L.push('');
   }
@@ -197,6 +196,9 @@ export class MemoryWorld implements World {
   private backend: StoreBackend | null = null; // 存储后端(json/sqlite),stop 时统一 flush 关闭
   private lastCursor = 0; // 自动捕获已扫到的事件游标(启动=当前尾,不回灌历史)
   private captureTimer: ReturnType<typeof setInterval> | null = null;
+  // 记忆快照去重/原位替换。没有它时,30s 一拍会在总线上堆几十份完全相同的超长文本,
+  // 等下一次唤醒整批投递 → 上下文爆炸(用户反馈 02:32→03:09)。
+  private snapshot: SnapshotPusher | null = null;
 
   constructor(private readonly ctx: WorldContext<MemoryConfig>) {}
 
@@ -212,6 +214,11 @@ export class MemoryWorld implements World {
 
   private get cfg(): MemoryConfig {
     return this.ctx.cfg;
+  }
+
+  private get dataDir(): string {
+    const d = (this.ctx as { dataDir?: unknown }).dataDir;
+    return typeof d === 'string' && d ? d : '.';
   }
 
   tools(): ToolDef[] {
@@ -289,10 +296,10 @@ export class MemoryWorld implements World {
     }
 
     this.timer = setInterval(() => {
-      this.push('memory.context', buildEventText(this.view()));
+      void this.pushContextSnapshot();
     }, Math.max(10_000, this.cfg.observeIntervalMs));
 
-    this.push('memory.context', buildEventText(this.view()));
+    void this.pushContextSnapshot(true);
 
     // 自动捕获:从当前事件尾开始(不回灌历史),周期扫描外部入站消息沉淀进记忆。
     try { this.lastCursor = (host.store?.latestCursor?.() ?? 0) || 0; } catch { this.lastCursor = 0; }
@@ -324,100 +331,125 @@ export class MemoryWorld implements World {
   }
 
   /**
-   * 导出全部记忆为 JSON / Markdown 文件(便于备份、迁移、阅读)。
-   * - format: 'json' | 'markdown' | 'both'
-   * - scope: 可选,按作用域/用户过滤(短期/事实/向量按 scope;反思/人格/档案按 userId;知识库为全局始终包含)
-   * - outDir: 导出目录,默认 <dataDir>/exports
+   * 导出全部记忆为文件。导出与迁入共用同一套 cortico-memory-export 规范,支持三种落盘格式:
+   * - json:   规范的 JSON 包(默认之一)
+   * - markdown:易读 Markdown(渲染自同一 bundle,仅展示用)
+   * - sqlite:  规范的 SQLite 包(结构与 json 完全一致,二者可互换)
+   * format 可填 json / markdown / sqlite / both(json+md) / all(三者),或用逗号/竖线组合。
+   * scope 可选,按作用域/用户过滤;知识库为全局始终包含。outDir 默认 <dataDir>/exports。
    */
   private async exportMemory(format: string, scope: string, outDir: string): Promise<{ text: string }> {
-    const wantJson = !format || format === 'both' || format === 'json';
-    const wantMd = !format || format === 'both' || format === 'markdown';
-    const dir = (outDir && outDir.trim()) || path.join(this.dataDir, 'exports');
+    const tokens = parseFormatTokens(format);
+    if (tokens.size === 0) {
+      return { text: '错误：format 只能是 json / markdown / sqlite / both / all（或以逗号、竖线组合的其中几种）。' };
+    }
+    const dir = (outDir && outDir.trim()) || join(this.dataDir, 'exports');
     mkdirSync(dir, { recursive: true });
 
-    const read = async (stem: string): Promise<_Dict> => {
-      try { return (await this.backend!.readJson(stem)) as _Dict; } catch { return {}; }
-    };
-
-    const memRaw = (await read('memory-data')) ?? {};
-    const factRaw = (await read('fact-store')) ?? {};
-    const vectorRaw = (await read('vector-memory')) ?? {};
-    const kbRaw = (await read('knowledge-base')) ?? {};
-    const reflRaw = (await read('reflection-data')) ?? {};
-    const personaRaw = (await read('persona-data')) ?? {};
-    const profileRaw = (await read('user-profiles')) ?? {};
-
-    let store = (memRaw.store ?? {}) as _Dict;
-    let notes = (memRaw.notes ?? {}) as _Dict;
-    let summary = (memRaw.summary ?? {}) as _Dict;
-    let topic = (memRaw.topic ?? {}) as _Dict;
-    let factScopes = (factRaw.scopes ?? {}) as _Dict;
-    let vectors = (vectorRaw.vectors ?? []) as any[];
-    let reflections = (reflRaw.reflections ?? []) as any[];
-    let rules = (reflRaw.interactionRules ?? []) as any[];
-    let personas = (personaRaw.personas ?? {}) as _Dict;
-    let profiles = (profileRaw.profiles ?? {}) as _Dict;
-    const globalStyle = (personaRaw.globalStyle ?? '') as string;
-    const knowledge = (kbRaw.entries ?? []) as any[];
-
-    const filterScope = (scope || '').trim();
-    if (filterScope) {
-      store = pickScope(store, filterScope);
-      notes = pickScope(notes, filterScope);
-      summary = pickScope(summary, filterScope);
-      topic = pickScope(topic, filterScope);
-      factScopes = pickScope(factScopes, filterScope);
-      vectors = vectors.filter((v: _Dict) => v.scope === filterScope);
-      reflections = reflections.filter((r: _Dict) => String(r.userId) === filterScope);
-      rules = rules.filter((r: _Dict) => String(r.userId) === filterScope);
-      personas = pickScope(personas, filterScope);
-      profiles = pickScope(profiles, filterScope);
-    }
-
-    const bundle: _Dict = {
-      exportedAt: new Date().toISOString(),
-      plugin: 'cortico-world-memory',
-      scope: filterScope || 'ALL',
-      backend: (this.backend as unknown as { constructor?: { name?: string } })?.constructor?.name ?? 'unknown',
-      memory: { store, summary, topic, notes },
-      facts: { scopes: factScopes },
-      vectors: { model: vectorRaw.model_name ?? null, vectors },
-      knowledge: { entries: knowledge },
-      reflection: { reflections, rules, stats: reflRaw.stats ?? {} },
-      persona: { personas, globalStyle },
-      profiles,
-    };
+    // 同一套规范 bundle —— json / markdown / sqlite 都从它派生
+    const bundle = buildBundle(this.backend!, scope, this.backend!.kind);
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
     const base = `memory-export-${stamp}`;
     const written: string[] = [];
 
-    if (wantJson) {
-      const p = path.join(dir, `${base}.json`);
-      writeFileSync(p, JSON.stringify(bundle, null, 2), 'utf8');
+    if (tokens.has('markdown')) {
+      const p = join(dir, `${base}.md`);
+      writeFileSync(p, renderMemoryMarkdown(bundle as unknown as _Dict), 'utf8');
       written.push(p);
     }
-    if (wantMd) {
-      const p = path.join(dir, `${base}.md`);
-      writeFileSync(p, renderMemoryMarkdown(bundle), 'utf8');
+    if (tokens.has('json')) {
+      const p = join(dir, `${base}.json`);
+      writeBundleJson(bundle, p);
+      written.push(p);
+    }
+    if (tokens.has('sqlite')) {
+      const p = join(dir, `${base}.sqlite`);
+      writeBundleSqlite(bundle, p);
       written.push(p);
     }
 
-    const factCount = Object.values(factScopes).reduce((s: number, l: any) => s + (Array.isArray(l) ? l.length : 0), 0);
+    const factCount = Object.values(bundle.facts.scopes).reduce((s: number, l: any) => s + (Array.isArray(l) ? l.length : 0), 0);
+    const vecCount = Object.values(bundle.vectors.vectors).reduce((s: number, l: any) => s + (Array.isArray(l) ? l.length : 0), 0);
     const counts = [
-      `短期记忆 ${Object.keys(store).length} scope`,
-      `笔记 ${Object.keys(notes).length}`,
+      `短期记忆 ${Object.keys(bundle.memory.store).length} scope`,
+      `笔记 ${Object.keys(bundle.memory.notes).length}`,
       `事实 ${factCount} 条`,
-      `向量 ${vectors.length}`,
-      `知识 ${knowledge.length} 条`,
-      `反思 ${reflections.length} / 规则 ${rules.length}`,
-      `人格 ${Object.keys(personas).length} 用户`,
-      `档案 ${Object.keys(profiles).length} 用户`,
+      `向量 ${vecCount}`,
+      `知识 ${bundle.knowledge.entries.length} 条`,
+      `反思 ${bundle.reflection.reflections.length} / 规则 ${bundle.reflection.rules.length}`,
+      `人格 ${Object.keys(bundle.persona.personas).length} 用户`,
+      `档案 ${Object.keys(bundle.profiles).length} 用户`,
     ].join(' | ');
 
     return {
-      text: `记忆导出完成（${filterScope ? 'scope=' + filterScope : '全部'}）\n${counts}\n文件：\n` + written.map((w) => '- ' + w).join('\n'),
+      text: `记忆导出完成（${scope ? 'scope=' + scope : '全部'}，格式 ${[...tokens].join('+')}）\n${counts}\n文件：\n` + written.map((w) => '- ' + w).join('\n'),
     };
+  }
+
+  /**
+   * 把导出的记忆文件(.json 或 .sqlite)迁移/恢复进当前记忆库。
+   * 与导出共用同一规范:解析为同一 bundle 后再写回当前后端(json/sqlite 均可)。
+   * 为安全起见:先暂停自动捕获、flush 旧的在内存 stores(持久化待写+清旧定时器),
+   * 合并写入后端后再重建内存实例,使本次导入立即生效。
+   */
+  private async importBundle(filePath: string, mode: ImportMode): Promise<{ text: string }> {
+    const backend = this.backend!;
+    let result: ReadBundleResult;
+    try {
+      result = readBundleFromFile(filePath);
+    } catch (e: any) {
+      return { text: `⚠ 导入失败: ${e?.message ?? e}` };
+    }
+    const { bundle, source } = result;
+
+    // 暂停自动捕获,避免与导入并发写盘
+    const wasCapturing = !!this.captureTimer;
+    if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
+
+    // flush 旧的在内存 stores:持久化未落盘编辑,并清掉各自定时器
+    this.mem?.flush();
+    this.vectors?.flush();
+    this.facts?.flush();
+    this.kb?.flush();
+    this.reflect?.flush();
+    this.persona?.flush();
+    this.profile?.flush();
+
+    // 合并写入当前后端(json/sqlite 皆可)
+    const summary = applyBundle(backend, bundle, mode);
+
+    // 重建内存实例 —— 立刻读到导入后的数据
+    this.reloadStores();
+
+    // 恢复自动捕获
+    if (wasCapturing) this.startCapture();
+
+    // 让记忆快照立即反映导入后的内容
+    void this.pushContextSnapshot();
+
+    const scopes = summary.importedScopes.length ? summary.importedScopes.join(', ') : '（无 scope 键）';
+    return {
+      text:
+        `记忆导入完成（来源: ${source}，模式: ${mode}）\n` +
+        `写入存储段: ${summary.stems.join(', ')}\n` +
+        `涉及 scope: ${scopes}\n` +
+        `导出包信息: spec=${bundle.specVersion}, 时间=${bundle.exportedAt}, 原始作用域=${bundle.scope}, 原始后端=${bundle.backend}`,
+    };
+  }
+
+  /** 重建全部内存 store 实例(从当前后端重新加载),使导入/迁移立即生效。 */
+  private reloadStores(): void {
+    const dataDir = this.dataDir;
+    this.mem = new MemoryBase(dataDir, this.cfg.maxHistory, this.backend!);
+    this.vectors = new VectorStore(dataDir, this.backend!);
+    this.facts = new FactStore(dataDir, this.backend!);
+    this.kb = new KnowledgeStore(dataDir, this.backend!);
+    this.reflect = new ReflectionStore(dataDir, this.backend!);
+    this.persona = new PersonaStore(dataDir, this.backend!);
+    this.profile = new ProfileStore(dataDir, this.backend!);
+    // 内容已变,让下一次快照无条件重推(旧的未投递快照会被撤回)
+    this.snapshot?.invalidate();
   }
 
   /** 启动自动捕获轮询(尊重暂停开关)。 */
@@ -464,17 +496,44 @@ export class MemoryWorld implements World {
     return buildView(this.mem!, this.vectors!, 'main', this.cfg.notesInPrompt, this.profile);
   }
 
-  private push(type: string, text: string) {
-    if (!this.host) return;
+  private async push(type: string, text: string): Promise<EventEnvelope | null> {
+    if (!this.host) return null;
     this.seq += 1;
     // 内部事件+piggyback:记忆快照进会话历史但不唤醒回合,否则每个周期会触发生成让 bot 自言自语。
-    this.host.pushEvent({
-      type,
-      ts: new Date().toISOString(),
-      source: this.id,
-      origin: 'internal',
-      text,
-    }, { trigger: 'piggyback' }).catch(() => {});
+    try {
+      return await this.host.pushEvent({
+        type,
+        ts: new Date().toISOString(),
+        source: this.id,
+        origin: 'internal',
+        text,
+      }, { trigger: 'piggyback' });
+    } catch {
+      return null;
+    }
+  }
+
+  /** 记忆快照的语义指纹:只认会改变「她记得什么」的字段,忽略条数等易变统计。 */
+  private contextSignature(): string {
+    return snapshotSignature(this.view());
+  }
+
+  /**
+   * 推一条记忆快照(piggyback 内部事件)。
+   * 去重与「撤回上一条未投递快照」的策略在 SnapshotPusher 里(有单测),这里只负责装配。
+   */
+  private async pushContextSnapshot(force = false): Promise<void> {
+    if (!this.host || !this.mem || !this.vectors) return;
+    if (!this.snapshot) {
+      const host = this.host;
+      this.snapshot = new SnapshotPusher({
+        push: async (text) => (await this.push('memory.context', text))?.cursor ?? null,
+        withdraw: async (cursor) => {
+          try { return (await host.withdrawPending?.(cursor)) === true; } catch { return false; }
+        },
+      });
+    }
+    await this.snapshot.maybePush(this.contextSignature(), buildEventText(this.view()), force);
   }
 
   // ---- 工具表:mem_ 前缀(框架内工具名全局唯一,避开 mc_*/其它 World) ----
@@ -523,12 +582,15 @@ export class MemoryWorld implements World {
             : this.vectors!.hybridSearch(scope, query, vector, topK);
           const facts = global ? this.facts!.recallAll(query, topK) : this.facts!.recall(scope, query, topK);
           // 合并两路结果,按 text 去重,事实库命中的优先(更精确)。
+          const items: string[] = [];
           const seen = new Set<string>();
-          const out: string[] = [];
-          for (const f of facts) if (!seen.has(f.text)) { seen.add(f.text); out.push(f.text); }
-          for (const h of hits) if (!seen.has(h.text)) { seen.add(h.text); out.push(h.text); }
-          if (!out.length) return `OK ${global ? '全部域' : scope} 里没有匹配「${query}」的记忆`;
-          return `OK ${out.slice(0, topK).map((t, i) => `${i + 1}. ${t}`).join('\n')}`;
+          for (const f of facts) if (!seen.has(f.text)) { seen.add(f.text); items.push(f.text); }
+          for (const h of hits) if (!seen.has(h.text)) { seen.add(h.text); items.push(h.text); }
+          if (!items.length) return `OK ${global ? '全部域' : scope} 里没有匹配「${query}」的记忆`;
+          // 长度封顶:单条与总量都受限,避免超长记忆(尤其自动捕获的整段聊天)打爆上下文。
+          const fmt = formatRecallResults(items, { maxItems: topK });
+          const head = fmt.shown < fmt.total ? `（命中 ${fmt.total} 条，按长度上限显示前 ${fmt.shown} 条）\n` : '';
+          return `OK ${head}${fmt.body}`;
         }),
       mem_recent: mk('mem_recent', '回看本域最近的短期对话(最多 maxHistory 条)。', { n: num('条数'), scope: str('记忆域') }, [], ['read', 'snapshot'],
         async (a) => {
@@ -692,9 +754,9 @@ export class MemoryWorld implements World {
         async () => { this.mem?.flush(); this.vectors?.flush(); this.facts?.flush(); this.kb?.flush(); this.reflect?.flush(); this.persona?.flush(); this.profile?.flush(); return 'OK 已落盘'; }),
       mem_export: mk(
         'mem_export',
-        '把全部记忆导出为文件(JSON/Markdown),便于备份、迁移、阅读。知识库为全局始终包含;其他可按作用域/用户过滤。',
+        '把全部记忆导出为文件,便于备份/迁移/阅读。导出与迁入共用同一套 cortico-memory-export 规范,json 与 sqlite 可互换。知识库为全局始终包含;其他可按作用域/用户过滤。',
         {
-          format: { type: 'string', optional: true, title: '格式', description: "json | markdown | both(默认 both)。" },
+          format: { type: 'string', optional: true, title: '格式', description: "json | markdown | sqlite | both(json+md) | all(三者),或用逗号/竖线组合;默认 both。" },
           scope: { type: 'string', optional: true, title: '作用域过滤', description: '可选,按作用域/用户过滤(短期/事实/向量按 scope;反思/人格/档案按 userId)。留空导出全部。' },
           outDir: { type: 'string', optional: true, title: '导出目录', description: '可选,文件保存目录,默认 <数据目录>/exports。' },
         },
@@ -704,8 +766,23 @@ export class MemoryWorld implements World {
           const format = typeof args.format === 'string' ? args.format.trim().toLowerCase() : 'both';
           const scope = typeof args.scope === 'string' ? args.scope.trim() : '';
           const outDir = typeof args.outDir === 'string' ? args.outDir.trim() : '';
-          if (!['json', 'markdown', 'both'].includes(format)) return { text: '错误：format 只能是 json / markdown / both。' };
           return await this.exportMemory(format, scope, outDir);
+        },
+      ),
+      mem_import: mk(
+        'mem_import',
+        '把导出的记忆文件(.json 或 .sqlite,遵循 cortico-memory-export 规范)迁移/恢复进当前记忆库。导出与迁入使用同一套规范,两种格式可互换。默认 merge(按 scope/userId 合并、数组去重);可选 replace 覆盖数组型内容(向量/知识/反思/笔记等)。',
+        {
+          path: { type: 'string', title: '文件路径', description: '.json 或 .sqlite 记忆导出文件(绝对或相对路径)。' },
+          mode: { type: 'string', optional: true, title: '合并模式', description: "merge(默认) | replace。merge 按作用域/用户合并并对数组去重;replace 覆盖数组型内容。" },
+        },
+        ['path'],
+        ['write', 'act'],
+        async (args: _Dict) => {
+          const p = typeof args.path === 'string' ? args.path.trim() : '';
+          if (!p) return { text: '错误：必须提供 path(导出文件路径)。' };
+          const mode: ImportMode = args.mode === 'replace' ? 'replace' : 'merge';
+          return await this.importBundle(p, mode);
         },
       ),
     };

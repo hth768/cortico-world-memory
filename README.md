@@ -9,12 +9,14 @@ Cortico World 扩展:把 `E:/qq_bot` 的记忆系统移植成框架内的一格 
 | `memory.py` `Memory` | `src/memory.ts` `MemoryBase` | 三级记忆:短期(cap 环形)/摘要/话题 + JSON 防抖落盘 + overflow 取半;`user:{id}` 统一键改为调用方 scope(默认 `main`) |
 | `vector_memory.py` | `src/vector-store.ts` `VectorStore` | Hybrid Recall = BM25(CJK 2/3-gram,仅 query 建 DF)+ Cosine(预归一化点积)+ RRF(k=60);矩阵按 scope 缓存、版本号失效;存储同款 `base64(fp16)` JSON,可与 `E:/qq_bot/vector_memory.json` 互导 |
 | `memory_server.py`(sidecar) | `src/embedding.ts` `EmbeddingClient` | 「重负载外置 + 掉线降级」同一语义:`sidecar` 模式直接 POST qq_bot memory_server 的 `/call` 调 `vector_memory.generate_embedding`;另有 `http`(OpenAI 兼容 /embeddings)与 `off`(纯 BM25);任一失败自动降级 BM25 |
-| `memory_context.py` | `src/observe.ts` + `src/ENV_PROMPT.md` | 记忆上下文注入:走 envPrompt 插值(要点/摘要/话题常驻前缀)+ 周期 `memory.context` 事件 |
+| `memory_context.py` | `src/observe.ts` + `src/ENV_PROMPT.md` | 记忆上下文注入:走 envPrompt 插值(要点/摘要/话题常驻前缀)+ 周期 `memory.context` 事件。周期事件**只在内容变化时推**,且推新的会撤回上一条未投递的快照(等价源版「原位替换」),避免 piggyback 在总线里堆几十份重复长文 |
 | `important_notes.py`(存取部分) | `MemoryBase.addNote/removeNote` + `mem_note` 工具 | 重要信息常驻进提示词,条数上限 `notesInPrompt` |
 
 ## 工具(人格可调用)
 
-`mem_remember` / `mem_recall` / `mem_recent` / `mem_overflow` / `mem_summary` / `mem_topic` / `mem_note` / `mem_notes` / `mem_forget_note` / `mem_stats` / `mem_flush`
+`mem_remember` / `mem_recall` / `mem_recent` / `mem_overflow` / `mem_summary` / `mem_topic` / `mem_note` / `mem_notes` / `mem_forget_note` / `mem_stats` / `mem_flush` / `mem_export` / `mem_import`
+
+导出与迁入共用 `cortico-memory-export` 规范(`src/migrate.ts`),`.json` 与 `.sqlite` 同源可互换:`mem_export` 支持 `json`/`markdown`/`sqlite`(`both`=json+md,`all`=三者),`mem_import` 默认 `merge`(按 scope/userId 合并去重),可选 `replace`。
 
 ## 部署
 

@@ -46,6 +46,14 @@ export function promptVars(view: MemoryView): Record<string, string> {
   };
 }
 
+/**
+ * 快照语义指纹:只取「她记得什么」的字段(档案/摘要/话题/要点),忽略向量条数这类易变统计。
+ * 用于周期推送去重——没有它,30s 一拍会把同一份长文本重复塞进事件队列。
+ */
+export function snapshotSignature(view: MemoryView): string {
+  return [view.profileHint, view.summary, view.topic, view.notes.map((n) => n.text).join('\u0001')].join('\u0000');
+}
+
 /** 周期推送用的事件正文(比提示词变量更啰嗦,给人格当「记忆快照」)。 */
 export function buildEventText(view: MemoryView): string {
   const lines: string[] = ['# 记忆快照 (memory)'];

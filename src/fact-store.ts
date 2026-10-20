@@ -9,6 +9,9 @@ export interface Fact {
   updatedAt: number;
 }
 
+/** 单条事实落盘前的最大长度(超长截断,与召回端 RECALL_ITEM_MAX 形成双截断兜底)。 */
+export const FACT_TEXT_MAX = 2000;
+
 /**
  * 独立事实库(对齐 qq_bot fact_store 的行为):
  * - per-scope 隔离(user_id 等价)
@@ -64,8 +67,9 @@ export class FactStore {
     const list = this.data[scope] ?? (this.data[scope] = []);
     const now = Date.now() / 1000;
     for (const t of texts) {
-      const text = (t ?? '').toString().trim();
+      let text = (t ?? '').toString().trim();
       if (!text) continue;
+      if (text.length > FACT_TEXT_MAX) text = text.slice(0, FACT_TEXT_MAX);
       const h = this.hash(scope, text);
       if (list.some((f) => f.hash === h)) continue; // 去重
       list.push({ hash: h, text, confidence: 1.0, createdAt: now, updatedAt: now });
