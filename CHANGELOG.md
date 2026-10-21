@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.6
+
+新增「清理捕获污染」工具 `mem_purge_capture`（按用户意见:使用时征求同意）。
+
+- 0.2.5 之前的事实库可能已被非真人消息污染(反馈实测约 64%)。本工具两步确认:
+  1. **默认只预览**——列出每个记忆域(scope)的条数并标注疑似非真人捕获域(`*.self` / `persona` / `*.touch` / `desktop-pet.*` 非 `.chat`),**不删任何数据**;
+  2. 仅当显式带 `confirm=1` 才真正删除;可指定 `scope`(逗号分隔)定点清理,留空则清理全部疑似域。删除不可撤销。
+- `FactStore` 新增 `listScopes()` 与 `purge(scopes)`(删除即落盘,空数组安全不删)。
+- 测试:新增 `test/fact-purge.test.ts`(10 项:listScopes/purge 计数/持久化/疑似域判定)。`npm test` 现跑六套。
+
 ## 0.2.5
 
 依据用户反馈（world 扩展版本）修复两类长期存在的设计缺口。

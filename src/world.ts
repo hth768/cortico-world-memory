@@ -792,6 +792,32 @@ export class MemoryWorld implements World {
           const n = await this.backfillVectors(Math.min(100, Number(a.limit) || 20));
           return n ? `OK 本轮补建 ${n} 条向量索引` : 'OK 没有待补建的索引(或向量已关闭)';
         }),
+      mem_purge_capture: mk('mem_purge_capture', '清理自动捕获产生的「非真人消息」事实(工具回执/自言/系统互动模板/交接笔记),恢复 mem_recall 召回质量。⚠️ 两步确认:默认只预览——列出每个记忆域的条数并标注疑似非真人捕获域,不删任何数据;只有显式带 confirm=1 才真正删除。删除不可撤销,请先看清预览再确认。', { scope: str('要清理的记忆域(逗号分隔);留空=清理预览里标注的全部疑似非真人域'), confirm: num('确认删除:填 1 才真正执行,否则仅预览') }, [], ['write', 'act'],
+        async (a) => {
+          const scopes = this.facts!.listScopes();
+          // 启发式标注疑似非真人捕获域(事实已丢原始事件元数据,只能按域命名判断)。
+          const isSuspect = (s: string) =>
+            /\.self$/.test(s) || s === 'persona' || s.includes('.touch') ||
+            (s.startsWith('desktop-pet.') && !s.endsWith('.chat'));
+          const stats = scopes
+            .map((s) => ({ s, n: this.facts!.count(s), bad: isSuspect(s) }))
+            .sort((x, y) => y.n - x.n);
+
+          // 未确认 → 仅预览,不删任何数据
+          if (!Number(a.confirm)) {
+            const lines = stats.map((x) => `- ${x.s}: ${x.n} 条${x.bad ? '  ⚠疑似非真人捕获域' : ''}`).join('\n');
+            const total = stats.filter((x) => x.bad).reduce((s, x) => s + x.n, 0);
+            return `OK 预览(未删除任何数据)\n${lines}\n\n疑似非真人捕获域合计约 ${total} 条。确认清理请带 confirm=1(可加 scope 指定域,留空清理全部疑似域)再调用一次。`;
+          }
+
+          // 已确认 → 执行删除(confrim=1)
+          const arg = typeof a.scope === 'string' && a.scope.trim()
+            ? a.scope.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+            : stats.filter((x) => x.bad).map((x) => x.s);
+          if (!arg.length) return 'OK 没有要清理的域,未删除任何数据';
+          const removed = this.facts!.purge(arg);
+          return `OK 已清理 ${removed} 条非真人捕获事实(域: ${arg.join(', ')})`;
+        }),
       mem_flush: mk('mem_flush', '把记忆立即落盘(平时自动防抖落盘,一般不用调)。', {}, [], ['act'],
         async () => { this.mem?.flush(); this.vectors?.flush(); this.facts?.flush(); this.kb?.flush(); this.reflect?.flush(); this.persona?.flush(); this.profile?.flush(); return 'OK 已落盘'; }),
       mem_export: mk(

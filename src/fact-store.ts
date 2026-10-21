@@ -109,6 +109,31 @@ export class FactStore {
     return (this.data[scope] ?? []).length;
   }
 
+  /** 列出所有记忆域(scope)名。 */
+  listScopes(): string[] {
+    return Object.keys(this.data);
+  }
+
+  /**
+   * 删除指定记忆域的全部事实(清理「自动捕获污染」用)。
+   * 返回删除条数并立即落盘。不传 scope 或空数组则什么都不删(安全默认)。
+   */
+  purge(scopes: string[]): number {
+    const set = new Set(scopes.map((s) => s.trim()).filter(Boolean));
+    if (!set.size) return 0;
+    let removed = 0;
+    for (const s of set) {
+      const list = this.data[s];
+      if (list && list.length) {
+        removed += list.length;
+        delete this.data[s];
+        this.dirty = true;
+      }
+    }
+    if (removed) this.saveNow();
+    return removed;
+  }
+
   /**
    * 跨 scope 召回:扫描全部 scope 的事实,按词频打分、按 hash 去重、取 top_k。
    * 用于「自动捕获的对话」与显式事实共存的场景——scope 留空时也能搜到对话域。
