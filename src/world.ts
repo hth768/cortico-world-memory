@@ -239,7 +239,32 @@ export class MemoryWorld implements World {
     return Object.values(new MemoryWorld(ctx).buildTools()) as ToolSpec[];
   }
 
+  /** 启发式判断某个记忆域(scope)是否为「非真人自动捕获」(事实落盘时已丢原始事件元数据,只能按域命名判断)。 */
+  private isSuspectScope(s: string): boolean {
+    return /\.self$/.test(s) || s === 'persona' || s.includes('.touch') ||
+      (s.startsWith('desktop-pet.') && !s.endsWith('.chat'));
+  }
+
+  /** 生成「捕获污染」预览:各域条数 + 是否疑似非真人 + 疑似域总条数。供 mem_purge_capture 与控制台存储清理项共用。 */
+  private capturePollutionPreview(): { scopes: Array<{ s: string; n: number; bad: boolean }>; total: number } {
+    const scopes = (this.facts?.listScopes() ?? [])
+      .map((s) => ({ s, n: this.facts!.count(s), bad: this.isSuspectScope(s) }))
+      .sort((x, y) => y.n - x.n);
+    const total = scopes.filter((x) => x.bad).reduce((s, x) => s + x.n, 0);
+    return { scopes, total };
+  }
+
   webUi() {
+    const factStorePath = join(this.dataDir, 'fact-store.json');
+    const pollutionPreview = () => {
+      const { scopes, total } = this.capturePollutionPreview();
+      if (!scopes.length) return '当前没有记忆域,无需清理。';
+      const lines = scopes.map((x) => `- ${x.s}: ${x.n} 条${x.bad ? '  ⚠疑似非真人捕获域' : ''}`).join('\n');
+      return (
+        `点击确认将清理以下疑似「非真人消息」自动捕获域(删除不可撤销):\n${lines}\n\n` +
+        `疑似合计约 ${total} 条。若只想清理其中部分域,请改用 mem_purge_capture 工具并指定 scope。`
+      );
+    };
     return {
       config: [MEMORY_CONFIG_GROUP], // 在「记忆系统」分组下渲染全部旋钮(含存储后端切换)
       promptDocs: [
@@ -254,6 +279,26 @@ export class MemoryWorld implements World {
             { name: 'memoryScopes', description: '现存记忆域列表' },
             { name: 'memoryVectors', description: '向量索引覆盖数/总数' },
           ],
+        },
+      ],
+      storage: [
+        {
+          key: 'capture-pollution',
+          label: '清理捕获污染（非真人消息）',
+          kind: 'disk',
+          location: factStorePath,
+          danger: true, // 危险操作 → 点击弹出危险确认框,框内展示上方预览,确认后才执行 clear()
+          note: pollutionPreview(),
+          stat: () => {
+            const { total } = this.capturePollutionPreview();
+            return `疑似 ${total} 条 / 共 ${this.facts?.count() ?? 0} 条`;
+          },
+          clear: () => {
+            const bad = (this.facts?.listScopes() ?? []).filter((s) => this.isSuspectScope(s));
+            if (!bad.length) return 'OK 没有要清理的域,未删除任何数据';
+            const removed = this.facts!.purge(bad);
+            return `OK 已清理 ${removed} 条非真人捕获事实(域: ${bad.join(', ')})`;
+          },
         },
       ],
     };
@@ -796,11 +841,8 @@ export class MemoryWorld implements World {
         async (a) => {
           const scopes = this.facts!.listScopes();
           // 启发式标注疑似非真人捕获域(事实已丢原始事件元数据,只能按域命名判断)。
-          const isSuspect = (s: string) =>
-            /\.self$/.test(s) || s === 'persona' || s.includes('.touch') ||
-            (s.startsWith('desktop-pet.') && !s.endsWith('.chat'));
           const stats = scopes
-            .map((s) => ({ s, n: this.facts!.count(s), bad: isSuspect(s) }))
+            .map((s) => ({ s, n: this.facts!.count(s), bad: this.isSuspectScope(s) }))
             .sort((x, y) => y.n - x.n);
 
           // 未确认 → 仅预览,不删任何数据

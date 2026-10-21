@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.7
+
+在控制台暴露「清理捕获污染」的 GUI 入口(按用户要求:点击先预览,确认后再清理)。
+
+- world 扩展的 `webUi()` 没有 `panels`(只有 Persona 有)、`config` 字段类型也无按钮类,无法在配置「表单」里直接加按钮。框架原生的清理入口是 `storage` 存储项:控制台渲染成数据标签里的「清除」按钮,`danger: true` 时点击弹出危险确认框,**预览文案写在 `note` 里随框展示**,确认后才执行 `clear()`。
+- 据此在 `webUi().storage` 新增 `capture-pollution` 项:label「清理捕获污染(非真人消息)」,`stat()` 实时显示「疑似 N 条 / 共 M 条」,`note` 实时列出各记忆域条数并标注疑似非真人捕获域(预览),`clear()` 执行 `FactStore.purge(疑似域)`,删除不可撤销。
+- 复用 0.2.6 的 `isSuspectScope` / `capturePollutionPreview` 共用方法(域命名启发式:`*.self` / `persona` / `*.touch` / `desktop-pet.*` 非 `.chat`),与 `mem_purge_capture` 工具行为一致。
+- 注:按钮落在扩展页面的「数据」标签(框架对 world 清理动作的原生位置),而非严格意义的配置表单页。
+
 ## 0.2.6
 
 新增「清理捕获污染」工具 `mem_purge_capture`（按用户意见:使用时征求同意）。
