@@ -10,6 +10,7 @@ import { EmbeddingClient } from './embedding.ts';
 import { VectorStore } from './vector-store.ts';
 import { FactStore } from './fact-store.ts';
 import { KnowledgeStore } from './knowledge-store.ts';
+import { isInboundUser } from './capture-filter.ts';
 import { ReflectionStore } from './reflection-store.ts';
 import { PersonaStore } from './persona-store.ts';
 import { ProfileStore } from './profile-store.ts';
@@ -137,14 +138,6 @@ function cleanCaptureText(t: string): string {
     .trim();
 }
 
-/** 自动捕获时判断事件是否为「真人入站消息」(world 无关:只认 origin='external' + 非 bot 自言)。 */
-function isInboundUser(e: EventEnvelope): boolean {
-  if (e.origin !== 'external') return false; // 排除 internal 回灌 / 记忆自身推送
-  const role = (e.meta?.role as string) ?? '';
-  if (role === 'assistant' || role === 'bot' || e.meta?.self === true) return false; // 排除 bot 自己
-  return true;
-}
-
 /**
  * 自动捕获的记忆域(scope):优先按「发送者 QQ 号」,做到私聊↔群聊按人统一——
  * 同一个人无论是在私聊还是群聊发言,记忆都沉淀到同一个 `qq:<号>` 域,无缝衔接。
@@ -196,6 +189,7 @@ export class MemoryWorld implements World {
   private backend: StoreBackend | null = null; // 存储后端(json/sqlite),stop 时统一 flush 关闭
   private lastCursor = 0; // 自动捕获已扫到的事件游标(启动=当前尾,不回灌历史)
   private captureTimer: ReturnType<typeof setInterval> | null = null;
+  private backfillTimer: ReturnType<typeof setInterval> | null = null;
   // 记忆快照去重/原位替换。没有它时,30s 一拍会在总线上堆几十份完全相同的超长文本,
   // 等下一次唤醒整批投递 → 上下文爆炸(用户反馈 02:32→03:09)。
   private snapshot: SnapshotPusher | null = null;
@@ -304,6 +298,17 @@ export class MemoryWorld implements World {
     // 自动捕获:从当前事件尾开始(不回灌历史),周期扫描外部入站消息沉淀进记忆。
     try { this.lastCursor = (host.store?.latestCursor?.() ?? 0) || 0; } catch { this.lastCursor = 0; }
     if (this.cfg.autoCapture) this.startCapture();
+    // 后台补索引(0.2.5,B2):embeddingProvider 非 off 时,周期性把历史 vector:null 的条目补 embed。
+    // 解决「embeddingProvider 从 off 切到 on 后,off 期间产生的 723 条记录永远没索引」的问题。
+    // 低频+限流(默认每轮 20 条),与捕获错开时间,避免一次性 700+ 次 embed 把本地 Ollama 打满。
+    if (this.cfg.embeddingProvider !== 'off') {
+      const capMs = Math.max(5_000, Number(this.cfg.captureIntervalMs) || 20_000);
+      const bfMs = Math.max(30_000, capMs * 3);
+      this.backfillTimer = setInterval(() => { void this.backfillVectors(20); }, bfMs);
+      this.backfillTimer.unref?.();
+      const kick = setTimeout(() => { void this.backfillVectors(20); }, 15_000); // 启动后稍等再首跑,错开初始化
+      kick.unref?.();
+    }
     // QQ 插件笔记本桥：启用时让 qq_note_* 直接写入本插件笔记库('qq' scope)，复用常驻环境提示词与混合检索。
     (globalThis as Record<string, unknown>)['cortico:memory:notebook'] = {
       kind: 'memory' as const,
@@ -320,6 +325,7 @@ export class MemoryWorld implements World {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
+    if (this.backfillTimer) { clearInterval(this.backfillTimer); this.backfillTimer = null; }
     this.mem?.flush();
     this.vectors?.flush(); // 防抖写盘强制落盘
     this.facts?.flush();
@@ -482,14 +488,42 @@ export class MemoryWorld implements World {
       if (text.length < (this.cfg.captureMinLength ?? 2)) continue;
       // scope 优先按发送者 QQ 号(私聊↔群聊按人统一);非 QQ 来源退化为会话地址/来源。
       const scope = scopeOfEvent(e);
-      this.facts!.add(scope, [text]);
+      // 事实库先去重(返回新增条数)。已存在则跳过 embed 与向量写入(B1:重复事件不再重复烧 embed 窗口)。
+      const added = this.facts!.add(scope, [text]);
+      if (!added) continue;
       const vec = this.cfg.embeddingProvider === 'off' ? null : await this.embedder!.embed(text);
       this.vectors!.add(scope, text, vec, this.cfg.maxVectorsPerScope);
-      captured++;
+      captured++; // 仅统计「本次实际新增的向量」(之前虚报为事件数)
     }
     this.lastCursor = to;
     if (captured > 0) { this.facts!.flush(); this.vectors!.flush(); }
     return captured;
+  }
+
+  /**
+   * 后台补索引(0.2.5,B2):扫描历史 `vector:null` 的条目并补 embed。
+   * embeddingProvider 从 off 切到 on 后,off 期间产生的记录(反馈里的 723/1834)永远不会被建索引——
+   * 此任务在宿主空闲时低频补建,使其逐步可参与向量召回。
+   * 返回本轮实际补建的条数;限流(默认每轮 20)以压住本地 Ollama。
+   */
+  private async backfillVectors(limitPerRound = 20): Promise<number> {
+    const host = this.host;
+    if (!host || !this.vectors || !this.embedder) return 0;
+    if (this.cfg.embeddingProvider === 'off') return 0; // 向量关闭则不补
+    if (host.isPaused?.() === true) return 0; // 宿主暂停时不抢资源
+    const pending = this.vectors.pendingVectors(limitPerRound);
+    if (!pending.length) return 0;
+    let done = 0;
+    for (const p of pending) {
+      try {
+        const vec = await this.embedder.embed(p.text);
+        if (vec && vec.length) { this.vectors.setVector(p.scope, p.index, vec); done++; }
+      } catch {
+        /* 单条失败不中断整轮,下一轮再试 */
+      }
+    }
+    if (done) this.vectors.flush();
+    return done;
   }
 
   private view() {
@@ -567,7 +601,10 @@ export class MemoryWorld implements World {
           const scope = scopeOf(a);
           const text = String(a.text);
           const added = this.facts!.add(scope, [text]); // 事实库:SHA-256 去重 + 原子落盘
-          this.vectors!.add(scope, text, this.cfg.embeddingProvider === 'off' ? null : await this.embedder!.embed(text), this.cfg.maxVectorsPerScope);
+          // 仅当事实库实际新增时才建向量(B1:重复记忆不再重复 embed/写向量);VectorStore.add 自身也有去重兜底。
+          if (added) {
+            this.vectors!.add(scope, text, this.cfg.embeddingProvider === 'off' ? null : await this.embedder!.embed(text), this.cfg.maxVectorsPerScope);
+          }
           return added ? `OK 已记住(${scope}): ${text.slice(0, 80)}` : `OK 已存在,跳过重复(${scope})`;
         }),
       mem_recall: mk('mem_recall', '按语义+关键词混合检索长期记忆(事实库全文 + BM25+向量+RRF 融合),找旧账/回忆约定时用。scope 留空或填 main = 跨全部记忆域(含自动捕获的对话);填具体 scope 只搜该域;可填某人的 qq:<QQ号> 来检索 TA 在私聊与群聊里统一沉淀的记忆(私聊↔群聊无缝衔接)。', { query: str('查询'), top_k: num('条数'), scope: str('记忆域(留空=全部)') }, ['query'], ['read'],
@@ -749,6 +786,11 @@ export class MemoryWorld implements World {
         async () => {
           const captured = await this.captureIncoming();
           return `OK 本次捕获 ${captured} 条;当前游标 ${this.lastCursor}`;
+        }),
+      mem_backfill: mk('mem_backfill', '后台补索引:把历史「无向量」的记忆条目(embeddingProvider=off 期间或 0.2.5 之前产生的)逐步补建向量索引,使其能参与语义召回。返回本轮实际补建的条数。可手动多跑几轮加速历史补建。', { limit: num('本轮上限(默认20,最多100)') }, [], ['act'],
+        async (a) => {
+          const n = await this.backfillVectors(Math.min(100, Number(a.limit) || 20));
+          return n ? `OK 本轮补建 ${n} 条向量索引` : 'OK 没有待补建的索引(或向量已关闭)';
         }),
       mem_flush: mk('mem_flush', '把记忆立即落盘(平时自动防抖落盘,一般不用调)。', {}, [], ['act'],
         async () => { this.mem?.flush(); this.vectors?.flush(); this.facts?.flush(); this.kb?.flush(); this.reflect?.flush(); this.persona?.flush(); this.profile?.flush(); return 'OK 已落盘'; }),

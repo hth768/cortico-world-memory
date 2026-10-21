@@ -176,18 +176,43 @@ export class VectorStore {
     this.versions.set(scope, (this.versions.get(scope) ?? 0) + 1);
   }
 
-  /** 追加一条;vector 为 null 时仅进 BM25 索引。超出上限截掉最旧的。 */
+  /** 追加一条;vector 为 null 时仅进 BM25 索引。超出上限截掉最旧的。重复文本(前 200 字相同)跳过,与 FactStore 去重镜像(B1:避免重复 embed 挤占窗口)。 */
   add(scope: string, text: string, vector: readonly number[] | null, maxPerScope: number): void {
     const s = scope || 'main';
     const list = (this.data.vectors[s] ??= []);
+    const key = text.slice(0, 200);
+    if (list.some((it) => it.text === key)) return; // 去重:已有相同文本则不重复 push/embed
     list.push({
-      text: text.slice(0, 200),
+      text: key,
       vector: vector && vector.length ? encodeVectorFp16(vector) : null,
       timestamp: Date.now() / 1000,
     });
     if (list.length > maxPerScope) this.data.vectors[s] = list.slice(-maxPerScope);
     this.invalidate(s);
     this.scheduleSave(); // 防抖写盘(原为每次 add 都同步 save)
+  }
+
+  /** 取出最多 limit 条 `vector:null` 的条目(scope/index/text),供后台补索引(B2)。 */
+  pendingVectors(limit: number): Array<{ scope: string; index: number; text: string }> {
+    const out: Array<{ scope: string; index: number; text: string }> = [];
+    for (const [scope, list] of Object.entries(this.data.vectors)) {
+      for (let i = 0; i < list.length; i++) {
+        if (!list[i]?.vector) {
+          out.push({ scope, index: i, text: list[i]!.text });
+          if (out.length >= limit) return out;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** 给某条原地补上/清除向量(后台补索引用),并失效该 scope 的矩阵缓存(B2)。 */
+  setVector(scope: string, index: number, vector: readonly number[] | null): void {
+    const list = this.data.vectors[scope];
+    if (!list || !list[index]) return;
+    list[index]!.vector = vector && vector.length ? encodeVectorFp16(vector) : null;
+    this.invalidate(scope);
+    this.scheduleSave();
   }
 
   private matrixFor(scope: string): MatrixCache | null {

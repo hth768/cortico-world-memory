@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-memory",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "Cortico World 扩展：五层记忆（事实库/知识库/反思/人格/档案）+ 三级记忆底座 + Hybrid Recall 向量混合检索（移植自 E:/qq_bot 的记忆系统与 memory_server 向量 sidecar，qq_bot 源码零改动）。",
   "repository": {
@@ -37,7 +37,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/snapshot.test.ts && tsx test/recall.test.ts && tsx test/fact-knowledge.test.ts"
+    "test": "tsx test/snapshot.test.ts && tsx test/recall.test.ts && tsx test/fact-knowledge.test.ts && tsx test/capture-filter.test.ts && tsx test/vector-store.test.ts"
   },
   "dependencies": {},
   "devDependencies": {
